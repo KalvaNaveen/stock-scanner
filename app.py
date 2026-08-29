@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from google import genai
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Pro Scanner & Backtester", layout="wide")
@@ -129,7 +130,32 @@ def evaluate_scanner_2(df, info):
         "YoY Profit %": round(profit_growth_yoy, 1),
         "52W High Status": "ATH Breakout" if ath_breakout else "Near 52W High"
     }
-
+    
+def get_ai_analysis(ticker, metrics, api_key):
+    """Passes the breakout data to Gemini for a fundamental/technical narrative."""
+    if not api_key:
+        return "No API key provided."
+        
+    client = genai.Client(api_key=api_key)
+    
+    prompt = f"""
+    You are an expert quantitative trader. The stock {ticker} just triggered a 
+    bullish breakout on our scanner with the following metrics:
+    {metrics}
+    
+    In 3 bullet points, provide a rapid risk-reward analysis of this setup. 
+    Mention general sector headwinds or tailwinds if relevant.
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        return response.text
+    except Exception as e:
+        return f"AI Analysis failed: {e}"
+        
 # --- UI ACTION BUTTONS ---
 tab1, tab2 = st.tabs(["🔍 Live Scanner", "📊 Backtesting Sandbox"])
 
