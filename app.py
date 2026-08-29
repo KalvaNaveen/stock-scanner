@@ -4,24 +4,21 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from google import genai
+import datetime
 
 st.set_page_config(page_title="Pro Cloud Scanner & AI Analyst", layout="wide")
 st.title("☁️ Cloud Stock Scanner & AI Backtesting Engine")
 
 # --- SIDEBAR CONFIGURATION ---
 st.sidebar.header("1. Upload Watchlist")
-uploaded_file = st.sidebar.file_uploader("Upload CSV (e.g., your 541 stocks)", type=['csv'])
+uploaded_file = st.sidebar.file_uploader("Upload CSV", type=['csv'])
 
 TICKERS = []
 if uploaded_file is not None:
     try:
         df_symbols = pd.read_csv(uploaded_file)
-        
-        # Smart column detection for Symbols
         col_name = next((col for col in df_symbols.columns if col.strip().lower() in ['symbol', 'ticker', 'symbols', 'tickers']), df_symbols.columns[0])
         raw_tickers = df_symbols[col_name].dropna().astype(str).tolist()
-        
-        # Ensure .NS suffix for Indian Stocks
         TICKERS = [t.strip() + '.NS' if not t.strip().endswith('.NS') else t.strip() for t in raw_tickers]
         st.sidebar.success(f"Loaded {len(TICKERS)} stocks.")
     except Exception as e:
@@ -30,21 +27,22 @@ if uploaded_file is not None:
 st.sidebar.header("2. Strategy Configuration")
 strategy_choice = st.sidebar.radio("Select Strategy", ["Scanner 1: 10/21 EMA Momentum", "Scanner 2: Techno-Funda Breakout"])
 
-st.sidebar.header("3. AI Integration (Optional)")
+# --- NEW: TIME MACHINE (HISTORICAL SCAN) ---
+st.sidebar.header("3. Time Machine (Historical Scan)")
+today = datetime.date.today()
+scan_date = st.sidebar.date_input("Run scan as of date:", value=today, max_value=today)
+
+st.sidebar.header("4. AI Integration (Optional)")
 gemini_api_key = st.sidebar.text_input("Enter Google Gemini API Key", type="password")
 
 # --- AI ANALYST FUNCTION ---
 def get_ai_analysis(ticker, metrics, api_key):
-    """Passes the breakout data to Gemini for a rapid fundamental/technical narrative."""
-    if not api_key:
-        return None
+    if not api_key: return None
     try:
         client = genai.Client(api_key=api_key)
         prompt = f"""
-        You are an expert quantitative trader. The Indian stock {ticker} just triggered a bullish breakout today.
-        Scanner Metrics: {metrics}
-        In exactly 3 bullet points, provide a rapid risk-reward analysis of this setup. 
-        Mention any known sector trends. Be concise.
+        You are an expert quantitative trader. The Indian stock {ticker} triggered a bullish breakout on our scanner with these metrics: {metrics}. 
+        In exactly 3 bullet points, provide a rapid risk-reward analysis of this setup.
         """
         response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         return response.text
@@ -104,50 +102,61 @@ if not TICKERS:
     st.warning("👈 Please upload your CSV file containing your stock symbols to begin.")
     st.stop()
 
-tab1, tab2 = st.tabs(["🔍 Live Scanner & AI Analyst", "📊 Backtesting Sandbox"])
+tab1, tab2 = st.tabs(["🔍 Live/Historical Scanner", "📊 Backtesting Sandbox"])
 
 with tab1:
-    st.subheader(f"Running: {strategy_choice}")
+    st.subheader(f"Running: {strategy_choice} | As of: {scan_date.strftime('%Y-%m-%d')}")
     if st.button("Start Cloud Scan"):
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        target_date = pd.to_datetime(scan_date)
+        
         for idx, ticker in enumerate(TICKERS):
             status_text.text(f"Scanning {ticker}...")
             try:
                 stock = yf.Ticker(ticker)
-                data = stock.history(period="2y")
+                # Fetch 5 years of data so historical scans have enough lookback period
+                data = stock.history(period="5y") 
+                
                 if not data.empty:
+                    # Strip timezones for clean date slicing
+                    data.index = data.index.tz_localize(None)
                     df = compute_technical_indicators(data)
-                    passed = False
-                    if "Scanner 1" in strategy_choice:
-                        passed, metrics = evaluate_scanner_1(df, stock.info.get('marketCap', 0))
-                    else:
-                        passed, metrics = evaluate_scanner_2(df, stock.info)
                     
-                    if passed:
-                        metrics["Ticker"] = ticker
-                        results.append(metrics)
+                    # TIME MACHINE: Truncate dataframe up to the user's selected date
+                    df_historical = df.loc[:target_date]
+                    
+                    if not df_historical.empty and len(df_historical) >= 260:
+                        passed = False
+                        if "Scanner 1" in strategy_choice:
+                            passed, metrics = evaluate_scanner_1(df_historical, stock.info.get('marketCap', 0))
+                        else:
+                            passed, metrics = evaluate_scanner_2(df_historical, stock.info)
+                        
+                        if passed:
+                            metrics["Ticker"] = ticker
+                            # Show the actual date it triggered (helpful if they pick a weekend)
+                            metrics["Trigger Date"] = df_historical.index[-1].strftime('%Y-%m-%d')
+                            results.append(metrics)
             except Exception:
                 pass
             progress_bar.progress((idx + 1) / len(TICKERS))
         
         status_text.text("Scan Complete!")
         if results:
-            st.success(f"Found {len(results)} matching breakouts!")
+            st.success(f"Found {len(results)} matching breakouts as of {scan_date.strftime('%Y-%m-%d')}!")
             st.dataframe(pd.DataFrame(results).set_index("Ticker"), use_container_width=True)
             
-            # Trigger Gemini AI for the first 3 results to save API tokens
             if gemini_api_key:
                 st.subheader("🤖 Gemini Trade Analyst Insights")
                 for res in results[:3]:
                     with st.expander(f"AI Analysis for {res['Ticker']}", expanded=True):
                         with st.spinner("Gemini is analyzing the chart..."):
-                            analysis = get_ai_analysis(res['Ticker'], res, gemini_api_key)
-                            st.write(analysis)
+                            st.write(get_ai_analysis(res['Ticker'], res, gemini_api_key))
         else:
-            st.warning("No stocks passed all strict filters today.")
+            st.warning(f"No stocks passed all strict filters on {scan_date.strftime('%Y-%m-%d')}.")
 
 with tab2:
     st.subheader("Historical Backtest Engine")
@@ -156,7 +165,7 @@ with tab2:
     if st.button("Run Backtest"):
         with st.spinner(f"Backtesting {test_ticker}..."):
             stock = yf.Ticker(test_ticker)
-            df = stock.history(period="3y")
+            df = stock.history(period="5y")
             
             if len(df) > 200:
                 df = compute_technical_indicators(df)
@@ -173,7 +182,7 @@ with tab2:
                     elif sell_signal and in_pos:
                         in_pos = False
                         pnl = ((curr['Close'] - entry_price) / entry_price) * 100
-                        trades.append({"Entry": entry_date, "Exit": df.index[i], "Return %": round(pnl, 2)})
+                        trades.append({"Entry": entry_date.strftime('%Y-%m-%d'), "Exit": df.index[i].strftime('%Y-%m-%d'), "Return %": round(pnl, 2)})
                         
                 if trades:
                     tdf = pd.DataFrame(trades)
