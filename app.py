@@ -158,36 +158,57 @@ tab1, tab2 = st.tabs(["⚡ 1. EOD Scan & Deep AI Scoring", "📓 2. Live Portfol
 with tab1:
     if not st.session_state['chartink_data'].empty:
         df = st.session_state['chartink_data']
+        top_stocks = df.sort_values(by="volume", ascending=False).head(15)
         
-        st.subheader("1. Run Deep AI Analysis")
+        st.subheader("1. Deep AI Analysis")
         st.write("Score today's breakouts using Gemini before adding them to your trading book.")
         
-        if st.button("🧠 Generate AI Scores (Batch Process)"):
-            if gemini_key:
-                with st.spinner("Sending batch request to Gemini..."):
-                    # Only analyze top 15 by volume to ensure we stay well within API limits
-                    top_stocks = df.sort_values(by="volume", ascending=False).head(15)
-                    scored_df = get_batch_ai_scores(top_stocks, gemini_key)
-                    
-                    # Merge scores back into main dataframe
-                    for idx, row in scored_df.iterrows():
-                        df.at[idx, 'AI_Score'] = row['AI_Score']
-                        df.at[idx, 'AI_Analysis'] = row['AI_Analysis']
-                        
-                st.session_state['chartink_data'] = df
-                df.to_csv(SCAN_FILE, index=False)
-                st.success("Deep AI Analysis Complete! No API Limits Hit.")
-            else:
-                st.error("Please provide a Gemini API Key in the sidebar.")
+        # --- THE MANUAL AI BRIDGE ---
+        with st.expander("🛠️ API Limit Bypass (Use Personal Gemini Web)", expanded=True):
+            st.markdown("Hit an API rate limit? Generate the prompt below, paste it into [Gemini Web](https://gemini.google.com/), and paste the result back!")
+            
+            # 1. Generate the Prompt
+            stock_list = "\n".join([f"- {row['nsecode']}: {row['name']}" for _, row in top_stocks.iterrows()])
+            manual_prompt = f"""You are a strict institutional quant analyst. Evaluate these Indian stocks for a momentum breakout tomorrow:
+{stock_list}
 
+Respond STRICTLY in JSON format. Format exactly like this:
+{{
+  "RELIANCE.NS": {{"score": 85, "thesis": "Strong volume, sector tailwinds..."}},
+  "TCS.NS": {{"score": 60, "thesis": "IT sector weak, wait for pullback..."}}
+}}"""
+            st.code(manual_clause, language="markdown") # Streamlit has a built-in copy button for code blocks!
+            st.code(manual_prompt, language="text")
+            
+            # 2. Receive the Answer
+            manual_json_input = st.text_area("Paste Gemini's JSON Response Here:")
+            if st.button("📥 Apply Manual AI Scores"):
+                try:
+                    clean_json = manual_json_input.replace("```json", "").replace("```", "").strip()
+                    scores = json.loads(clean_json)
+                    
+                    for idx, row in df.iterrows():
+                        symbol = row['nsecode']
+                        if symbol in scores:
+                            df.at[idx, 'AI_Score'] = scores[symbol].get('score', 0)
+                            df.at[idx, 'AI_Analysis'] = scores[symbol].get('thesis', "No thesis provided.")
+                            
+                    st.session_state['chartink_data'] = df
+                    df.to_csv(SCAN_FILE, index=False)
+                    st.success("✅ Manual AI Scores Applied Successfully!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to parse JSON. Make sure you copied only the JSON block. Error: {e}")
+
+        # --- ORGANIZE AND DISPLAY DATA ---
         st.markdown("---")
         display_df = df[['nsecode', 'name', 'close', 'volume', 'AI_Score', 'AI_Analysis']].copy()
         display_df.columns = ['Symbol', 'Company', 'LTP', 'Volume', 'AI Score', 'AI Thesis']
         st.dataframe(display_df.sort_values(by="AI Score", ascending=False), use_container_width=True)
         
+        # --- ADD TO PORTFOLIO ---
         st.markdown("---")
         st.subheader("2. Add to Next-Day Execution Book (9:15 AM)")
-        
         selected_stocks = st.multiselect("Select High-Conviction Stocks:", display_df['Symbol'].tolist())
         if st.button("Log Trades for Tomorrow"):
             new_trades = []
