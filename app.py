@@ -7,11 +7,13 @@ from bs4 import BeautifulSoup
 import plotly.graph_objects as go
 import re
 from google import genai
+import datetime
+import base64
 
 # ==========================================
-# 1. UI OVERHAUL: MODERN FINTECH DASHBOARD
+# 1. UI OVERHAUL & STATE MANAGEMENT
 # ==========================================
-st.set_page_config(page_title="Quant Momentum + AI", layout="wide")
+st.set_page_config(page_title="Quant Autonomous Engine", layout="wide")
 
 st.markdown("""
     <style>
@@ -19,89 +21,78 @@ st.markdown("""
     h1, h2, h3 { color: #FFFFFF; font-family: 'Inter', sans-serif; }
     .stButton>button { background: linear-gradient(135deg, #00F2FE 0%, #4FACFE 100%); color: #000; font-weight: bold; border: none; }
     div[data-testid="stMetricValue"] { color: #00FF88 !important; font-size: 2rem !important; }
-    div[data-testid="stMetricLabel"] { color: #94A3B8 !important; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ Quant Momentum & AI Engine")
+st.title("⚡ Autonomous Quant & Paper Trading Engine")
 
-# --- INITIALIZE SESSION STATE FOR SCRAPED DATA ---
-if 'chartink_data' not in st.session_state:
-    st.session_state['chartink_data'] = pd.DataFrame()
+# Initialize Session States
+if 'chartink_data' not in st.session_state: st.session_state['chartink_data'] = pd.DataFrame()
+if 'portfolio' not in st.session_state: st.session_state['portfolio'] = pd.DataFrame(columns=['Symbol', 'Status', 'Entry Date', 'Entry Price', 'Shares', 'Max Reached', 'Trailing SL', 'Current LTP', 'Unrealized P&L'])
 
 # ==========================================
-# 2. AI & SCRAPING FUNCTIONS
+# 2. CORE FUNCTIONS (Scraping, AI, Indicators)
 # ==========================================
-def get_ai_analysis(ticker, company_name, api_key):
+def get_ai_analysis(ticker, company, api_key):
     if not api_key: return "⚠️ Please enter your Gemini API key in the sidebar."
     try:
         client = genai.Client(api_key=api_key)
-        prompt = f"You are a quant trader. The stock {ticker} ({company_name}) hit our momentum screener. Give 3 short bullet points on risk-reward and sector tailwinds."
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        return response.text
+        prompt = f"Analyze {ticker} ({company}) for a momentum breakout. Give 3 short bullet points on risk-reward and sector trends."
+        return client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
     except Exception as e:
         return f"AI Analysis failed: {e}"
 
 @st.cache_data(ttl=300, show_spinner=False)
 def scrape_chartink(screener_url, manual_clause=""):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
         with requests.Session() as s:
             r = s.get(screener_url, headers=headers)
             soup = BeautifulSoup(r.text, 'html.parser')
-            
-            csrf_meta = soup.find('meta', {'name': 'csrf-token'})
-            csrf = csrf_meta['content'] if csrf_meta else ""
+            csrf = soup.find('meta', {'name': 'csrf-token'})['content'] if soup.find('meta', {'name': 'csrf-token'}) else ""
             
             scan_clause = manual_clause
             if not scan_clause:
-                clause_match = re.search(r'scan_clause\s*:\s*\'(.*?)\'', r.text) or re.search(r'name="scan_clause"\s+value="(.*?)"', r.text)
-                scan_clause = clause_match.group(1) if clause_match else ""
+                m = re.search(r'scan_clause\s*:\s*\'(.*?)\'', r.text) or re.search(r'name="scan_clause"\s+value="(.*?)"', r.text)
+                scan_clause = m.group(1) if m else ""
 
-            if not scan_clause:
-                return pd.DataFrame(), "Could not auto-detect scan clause. Please paste it manually."
+            if not scan_clause: return pd.DataFrame(), "Could not auto-detect scan clause."
 
-            process_url = 'https://chartink.com/screener/process'
-            post_headers = {'x-csrf-token': csrf, 'X-Requested-With': 'XMLHttpRequest', **headers}
-            payload = {'scan_clause': scan_clause}
-            
-            res = s.post(process_url, data=payload, headers=post_headers)
+            res = s.post('https://chartink.com/screener/process', 
+                         data={'scan_clause': scan_clause}, 
+                         headers={'x-csrf-token': csrf, 'X-Requested-With': 'XMLHttpRequest', **headers})
             
             if res.status_code == 200:
                 data = res.json()
-                
-                # Check if Chartink sent back an error message
-                if 'error' in data:
-                    return pd.DataFrame(), f"Chartink Error: {data['error']}"
-                
-                # Check if the scan ran but found 0 stocks
+                if 'error' in data: return pd.DataFrame(), f"Chartink Error: {data['error']}"
                 if 'data' in data:
-                    if len(data['data']) == 0:
-                        return pd.DataFrame(), "Success! The scan ran perfectly, but 0 stocks matched the criteria today."
-                    
+                    if len(data['data']) == 0: return pd.DataFrame(), "Success, but 0 stocks matched today."
                     df = pd.DataFrame(data['data'])
                     df['nsecode'] = df['nsecode'] + '.NS'
                     return df, "Success"
-                    
-                return pd.DataFrame(), f"Unexpected JSON response from Chartink: {data}"
-                
-            return pd.DataFrame(), f"Backend blocked request. HTTP Status: {res.status_code}"
+            return pd.DataFrame(), f"Rejected: {res.status_code}"
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-# ==========================================
-# 3. TRAILING RISK BACKTEST ENGINE
-# ==========================================
+def compute_historical_indicators(df):
+    """Calculates EMA 10/20, SMA 200, and 20-Day Relative Volume (RVOL)."""
+    if len(df) < 200: return df
+    df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
+    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    df['SMA_200'] = df['Close'].rolling(window=200).mean()
+    df['Avg_Vol_20'] = df['Volume'].rolling(window=20).mean()
+    df['RVOL'] = df['Volume'] / df['Avg_Vol_20'].replace(0, np.nan)
+    return df
+
 def run_trailing_backtest(df_price, capital, sl_pct):
     trades = []
     in_pos, entry_price, entry_date, shares, highest_price, current_sl = False, 0, None, 0, 0, 0
-    df_price['EMA_20'] = df_price['Close'].ewm(span=20, adjust=False).mean()
     
     for i in range(1, len(df_price)):
         curr, prev = df_price.iloc[i], df_price.iloc[i-1]
         
-        # ENTRY (Momentum crossover proxy)
-        if not in_pos and curr['Close'] > curr['EMA_20'] and prev['Close'] <= prev['EMA_20']:
+        # ENTRY (EMA 10 crossed above 20 & Close > 200 SMA)
+        if not in_pos and curr['EMA_10'] > curr['EMA_20'] and prev['EMA_10'] <= prev['EMA_20'] and curr['Close'] > curr['SMA_200']:
             in_pos, entry_price, entry_date = True, curr['Close'], df_price.index[i]
             shares = capital // entry_price
             highest_price, current_sl = entry_price, entry_price * (1 - sl_pct)
@@ -115,102 +106,197 @@ def run_trailing_backtest(df_price, capital, sl_pct):
             
             if curr['Low'] <= current_sl:
                 in_pos = False
-                exit_price = current_sl
                 trades.append({
-                    "Status": "Closed", "Entry Date": entry_date.strftime('%Y-%m-%d'), "Exit Date": df_price.index[i].strftime('%Y-%m-%d'),
-                    "Entry": round(entry_price, 2), "Exit": round(exit_price, 2), "Shares": int(shares), 
-                    "Max Reached": round(highest_price, 2), "P&L (₹)": round((exit_price - entry_price) * shares, 2),
-                    "ROI %": round(((exit_price - entry_price) / entry_price) * 100, 2)
+                    "Entry Date": entry_date.strftime('%Y-%m-%d'), "Exit Date": df_price.index[i].strftime('%Y-%m-%d'),
+                    "Entry Price": round(entry_price, 2), "Exit Price": round(current_sl, 2), "Shares": int(shares), 
+                    "P&L": round((current_sl - entry_price) * shares, 2)
                 })
-    
-    # INCLUDE OPEN TRADES (If stopped out hasn't happened yet)
-    if in_pos:
-        curr = df_price.iloc[-1]
-        trades.append({
-            "Status": "🟢 OPEN", "Entry Date": entry_date.strftime('%Y-%m-%d'), "Exit Date": "Running...",
-            "Entry": round(entry_price, 2), "Exit": round(curr['Close'], 2), "Shares": int(shares), 
-            "Max Reached": round(highest_price, 2), "P&L (₹)": round((curr['Close'] - entry_price) * shares, 2),
-            "ROI %": round(((curr['Close'] - entry_price) / entry_price) * 100, 2)
-        })
-        
-    return pd.DataFrame(trades)
+    return trades
 
 # ==========================================
-# 4. SIDEBAR CONFIG
+# 3. SIDEBAR CONFIG
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ Settings")
-    url_input = st.text_input("Chartink URL", value="https://chartink.com/screener/momentum-stocks-29112990")
-    capital = st.number_input("Capital Per Stock (₹)", value=100000, step=10000)
-    sl_percent = st.number_input("Trailing SL / Target (%)", value=2.0, step=0.5) / 100
+    st.header("⚙️ Core Settings")
+    capital = st.number_input("Capital Per Trade (₹)", value=100000, step=10000)
+    sl_percent = st.number_input("Trailing Risk (%)", value=2.0, step=0.5) / 100
     gemini_key = st.text_input("Gemini API Key", type="password")
     
     st.markdown("---")
-    st.header("🔧 Bypass Chartink Block")
-    st.markdown("Chartink occasionally blocks cloud servers. To bypass, paste the **scan_clause** from the website's source code below:")
-    
-    # Here is the missing input box!
-    manual_clause = st.text_area("Manual Scan Clause", placeholder="( {33619} ( latest close > ... ) )")
-    
-    if st.button("🚀 PULL CHARTINK DATA"):
-        with st.spinner("Scraping Chartink..."):
-            # I also updated this line to ensure the manual_clause is passed to the scraper
-            df, status = scrape_chartink(url_input, manual_clause) 
+    st.header("🔍 Chartink Scanner")
+    url_input = st.text_input("URL", value="https://chartink.com/screener/momentum-stocks-29112990")
+    manual_clause = st.text_area("Manual Scan Clause (Bypass)")
+    if st.button("🚀 RUN DAILY SCAN"):
+        with st.spinner("Scraping live data..."):
+            df, status = scrape_chartink(url_input, manual_clause)
             if not df.empty:
                 st.session_state['chartink_data'] = df
                 st.success(f"Scraped {len(df)} stocks!")
             else:
-                st.error(f"Failed: {status}")
+                st.error(status)
+                
+    st.markdown("---")
+    st.header("⏱️ Historical Universe")
+    st.write("Upload your CSV watchlist (e.g., 500 stocks) to run the Time Machine Backtester.")
+    uploaded_universe = st.file_uploader("Upload CSV", type=['csv'])
 
 # ==========================================
-# 5. TABS & UI EXECUTION
+# 4. TABBED INTERFACE
 # ==========================================
-tab1, tab2 = st.tabs(["📊 1. Live Chartink & AI Analysis", "🧪 2. Trailing Target Backtester"])
+tab1, tab2, tab3 = st.tabs(["⚡ 1. Today's Scan & AI", "📓 2. Live Paper Trading Book", "⏱️ 3. Historical Backtest (RVOL)"])
 
 # --- TAB 1: LIVE SCANNER ---
 with tab1:
     if not st.session_state['chartink_data'].empty:
         df = st.session_state['chartink_data']
-        display_df = df[['sr', 'nsecode', 'name', 'close', 'per_chg', 'volume']].copy()
-        display_df.columns = ['#', 'Symbol', 'Company', 'LTP', 'Change %', 'Volume']
-        st.dataframe(display_df.set_index('#'), use_container_width=True)
+        display_df = df[['nsecode', 'name', 'close', 'per_chg', 'volume']].copy()
+        display_df.columns = ['Symbol', 'Company', 'LTP', 'Change %', 'Volume']
+        st.dataframe(display_df, use_container_width=True)
+        
+        # Paper Trade Adder
+        st.subheader("➕ Add to Paper Trading")
+        selected_stocks = st.multiselect("Select stocks to enter tomorrow:", display_df['Symbol'].tolist())
+        if st.button("Save to Portfolio"):
+            new_trades = []
+            for sym in selected_stocks:
+                if sym not in st.session_state['portfolio']['Symbol'].values:
+                    ltp = display_df[display_df['Symbol'] == sym]['LTP'].values[0]
+                    shares = capital // ltp
+                    new_trades.append({
+                        'Symbol': sym, 'Status': '🟢 OPEN', 'Entry Date': datetime.date.today().strftime('%Y-%m-%d'),
+                        'Entry Price': ltp, 'Shares': shares, 'Max Reached': ltp, 
+                        'Trailing SL': round(ltp * (1 - sl_percent), 2), 'Current LTP': ltp, 'Unrealized P&L': 0.0
+                    })
+            if new_trades:
+                st.session_state['portfolio'] = pd.concat([st.session_state['portfolio'], pd.DataFrame(new_trades)], ignore_index=True)
+                st.success(f"Added {len(new_trades)} stocks to your Paper Trading Book!")
         
         if gemini_key:
-            st.subheader("🤖 AI Insights (Top 3)")
+            st.subheader("🤖 AI Insights (Top 3 Momentum)")
             cols = st.columns(3)
             for idx, row in df.head(3).iterrows():
                 with cols[idx % 3]:
                     with st.expander(row['nsecode'].replace('.NS', ''), expanded=True):
                         st.write(get_ai_analysis(row['nsecode'], row['name'], gemini_key))
     else:
-        st.info("👈 Click 'PULL CHARTINK DATA' in the sidebar to begin.")
+        st.info("Run the Daily Scan in the sidebar to view today's breakouts.")
 
-# --- TAB 2: BACKTESTER ---
+# --- TAB 2: PAPER TRADING PORTFOLIO ---
 with tab2:
-    if not st.session_state['chartink_data'].empty:
-        st.subheader(f"Historical Momentum Backtest (₹{capital:,.0f} per stock | 2% Trailing Target)")
-        
-        test_ticker = st.selectbox("Select Scraped Stock to Test", st.session_state['chartink_data']['nsecode'].tolist())
-        
-        if st.button("Run Trailing Backtest on Stock"):
-            with st.spinner("Fetching historical data and trailing targets..."):
-                stock_data = yf.download(test_ticker, period="1y", interval="1d", progress=False)
-                if isinstance(stock_data.columns, pd.MultiIndex): stock_data.columns = stock_data.columns.droplevel(1)
+    st.subheader("📓 Active Paper Portfolio")
+    port_df = st.session_state['portfolio']
+    
+    if not port_df.empty:
+        if st.button("🔄 Update Live Prices & Trailing SL"):
+            with st.spinner("Fetching latest market data..."):
+                for idx, row in port_df.iterrows():
+                    if row['Status'] == '🟢 OPEN':
+                        try:
+                            live_data = yf.download(row['Symbol'], period="5d", progress=False)
+                            if not live_data.empty:
+                                current_close = float(live_data['Close'].iloc[-1])
+                                current_high = float(live_data['High'].iloc[-1])
+                                
+                                # Update logic
+                                if current_high > row['Max Reached']:
+                                    port_df.at[idx, 'Max Reached'] = current_high
+                                    new_sl = current_high * (1 - sl_percent)
+                                    if new_sl > row['Trailing SL']:
+                                        port_df.at[idx, 'Trailing SL'] = round(new_sl, 2)
+                                
+                                port_df.at[idx, 'Current LTP'] = round(current_close, 2)
+                                port_df.at[idx, 'Unrealized P&L'] = round((current_close - row['Entry Price']) * row['Shares'], 2)
+                                
+                                # Check if SL Hit
+                                if current_close <= port_df.at[idx, 'Trailing SL']:
+                                    port_df.at[idx, 'Status'] = '🔴 CLOSED (SL HIT)'
+                        except Exception:
+                            pass
+                st.session_state['portfolio'] = port_df
+                st.success("Prices and Trailing SLs updated!")
                 
-                trade_history = run_trailing_backtest(stock_data, capital, sl_percent)
-                
-                if not trade_history.empty:
-                    # Metrics
-                    closed_trades = trade_history[trade_history['Status'] == 'Closed']
-                    win_rate = (len(closed_trades[closed_trades['P&L (₹)'] > 0]) / len(closed_trades)) * 100 if len(closed_trades) > 0 else 0
-                    
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total Trades", len(trade_history))
-                    c2.metric("Win Rate (Closed Trades)", f"{win_rate:.1f}%")
-                    c3.metric("Net P&L", f"₹{trade_history['P&L (₹)'].sum():,.2f}")
-                    
-                    st.dataframe(trade_history.style.applymap(lambda x: 'color: #00FF88' if x == '🟢 OPEN' else '', subset=['Status']), use_container_width=True)
-                else:
-                    st.warning("No entries triggered for this stock in the last year.")
+        # Highlight Open vs Closed trades
+        def highlight_status(val):
+            color = '#00FF88' if 'OPEN' in str(val) else '#FF3366'
+            return f'color: {color}'
+            
+        st.dataframe(port_df.style.map(highlight_status, subset=['Status']), use_container_width=True)
+        
+        # Download Portfolio State
+        csv = port_df.to_csv(index=False).encode('utf-8')
+        st.download_button("💾 Download Portfolio Backup", csv, "paper_portfolio.csv", "text/csv")
     else:
-        st.info("👈 Pull Chartink data first to enable backtesting.")
+        st.info("Your portfolio is empty. Select stocks from Tab 1 to start paper trading.")
+
+# --- TAB 3: HISTORICAL RVOL BACKTESTER ---
+with tab3:
+    st.subheader("⏱️ Time Machine: Top RVOL Breakouts")
+    st.markdown("*Simulates a past date, ranks all breakouts by Relative Volume (RVOL), and trades only the Top 3.*")
+    
+    if uploaded_universe is not None:
+        uni_df = pd.read_csv(uploaded_universe)
+        col_name = next((col for col in uni_df.columns if col.strip().lower() in ['symbol', 'ticker']), uni_df.columns[0])
+        hist_tickers = [t.strip() + '.NS' if not t.strip().endswith('.NS') else t.strip() for t in uni_df[col_name].dropna().astype(str).tolist()]
+        
+        past_date = st.date_input("Select Historical Scan Date:", max_value=datetime.date.today())
+        
+        if st.button("Run Historical RVOL Simulation"):
+            with st.spinner(f"Simulating market on {past_date}... this takes a minute."):
+                target_date = pd.to_datetime(past_date)
+                passing_stocks = []
+                
+                # 1. SCAN THE PAST
+                progress = st.progress(0)
+                for idx, t in enumerate(hist_tickers[:100]): # Limited to 100 for speed, remove [:100] to scan all
+                    try:
+                        data = yf.download(t, period="5y", progress=False)
+                        if not data.empty and len(data) > 200:
+                            data.index = data.index.tz_localize(None)
+                            df_hist = data.loc[:target_date].copy() # Cut off future data
+                            
+                            if len(df_hist) > 200:
+                                df_hist = compute_historical_indicators(df_hist)
+                                curr, prev = df_hist.iloc[-1], df_hist.iloc[-2]
+                                
+                                # EMA 10>20 Crossover & Price > 200 SMA
+                                if curr['EMA_10'] > curr['EMA_20'] and prev['EMA_10'] <= prev['EMA_20'] and curr['Close'] > curr['SMA_200']:
+                                    passing_stocks.append({
+                                        'Symbol': t, 'Close': curr['Close'], 'RVOL': curr['RVOL'], 'Data': data # Pass full data for backtest
+                                    })
+                    except Exception:
+                        pass
+                    progress.progress((idx + 1) / len(hist_tickers[:100]))
+                progress.empty()
+                
+                if passing_stocks:
+                    # 2. RANK BY RVOL (Select Top 3 Quality Setups)
+                    results_df = pd.DataFrame(passing_stocks).sort_values(by='RVOL', ascending=False)
+                    top_3 = results_df.head(3)
+                    
+                    st.success(f"Found {len(results_df)} breakouts. Selected Top 3 based on RVOL.")
+                    st.dataframe(top_3[['Symbol', 'Close', 'RVOL']].reset_index(drop=True))
+                    
+                    # 3. BACKTEST THE TOP 3
+                    all_sim_trades = []
+                    for _, row in top_3.iterrows():
+                        # We pass the FULL historical data into the trailing backtester starting from the entry date
+                        full_data = compute_historical_indicators(row['Data'].copy())
+                        future_data = full_data.loc[target_date:] 
+                        trades = run_trailing_backtest(future_data, capital, sl_percent)
+                        for tr in trades:
+                            tr['Symbol'] = row['Symbol']
+                            all_sim_trades.append(tr)
+                            
+                    if all_sim_trades:
+                        sim_df = pd.DataFrame(all_sim_trades)[['Symbol', 'Entry Date', 'Exit Date', 'Entry Price', 'Exit Price', 'Shares', 'P&L']]
+                        st.subheader(f"Simulation Results (Trailing {sl_percent*100}% Risk)")
+                        
+                        total_pnl = sim_df['P&L'].sum()
+                        st.metric("Total Strategy P&L", f"₹{total_pnl:,.2f}")
+                        st.dataframe(sim_df, use_container_width=True)
+                    else:
+                        st.warning("Trades entered, but haven't triggered exit rules yet.")
+                else:
+                    st.error(f"No EMA breakouts found in the universe on {past_date}.")
+    else:
+        st.info("Please upload your CSV watchlist in the sidebar to enable the Time Machine.")
