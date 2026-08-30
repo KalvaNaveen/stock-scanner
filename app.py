@@ -44,31 +44,48 @@ def get_ai_analysis(ticker, company_name, api_key):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def scrape_chartink(screener_url, manual_clause=""):
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
     try:
         with requests.Session() as s:
             r = s.get(screener_url, headers=headers)
             soup = BeautifulSoup(r.text, 'html.parser')
-            csrf = soup.find('meta', {'name': 'csrf-token'})['content'] if soup.find('meta', {'name': 'csrf-token'}) else ""
+            
+            csrf_meta = soup.find('meta', {'name': 'csrf-token'})
+            csrf = csrf_meta['content'] if csrf_meta else ""
             
             scan_clause = manual_clause
             if not scan_clause:
                 clause_match = re.search(r'scan_clause\s*:\s*\'(.*?)\'', r.text) or re.search(r'name="scan_clause"\s+value="(.*?)"', r.text)
                 scan_clause = clause_match.group(1) if clause_match else ""
 
-            if not scan_clause: return pd.DataFrame(), "Could not auto-detect scan clause."
+            if not scan_clause:
+                return pd.DataFrame(), "Could not auto-detect scan clause. Please paste it manually."
 
-            res = s.post('https://chartink.com/screener/process', 
-                         data={'scan_clause': scan_clause}, 
-                         headers={'x-csrf-token': csrf, 'X-Requested-With': 'XMLHttpRequest', **headers})
+            process_url = 'https://chartink.com/screener/process'
+            post_headers = {'x-csrf-token': csrf, 'X-Requested-With': 'XMLHttpRequest', **headers}
+            payload = {'scan_clause': scan_clause}
+            
+            res = s.post(process_url, data=payload, headers=post_headers)
             
             if res.status_code == 200:
                 data = res.json()
-                if 'data' in data and len(data['data']) > 0:
+                
+                # Check if Chartink sent back an error message
+                if 'error' in data:
+                    return pd.DataFrame(), f"Chartink Error: {data['error']}"
+                
+                # Check if the scan ran but found 0 stocks
+                if 'data' in data:
+                    if len(data['data']) == 0:
+                        return pd.DataFrame(), "Success! The scan ran perfectly, but 0 stocks matched the criteria today."
+                    
                     df = pd.DataFrame(data['data'])
                     df['nsecode'] = df['nsecode'] + '.NS'
                     return df, "Success"
-            return pd.DataFrame(), f"Backend rejected request: {res.status_code}"
+                    
+                return pd.DataFrame(), f"Unexpected JSON response from Chartink: {data}"
+                
+            return pd.DataFrame(), f"Backend blocked request. HTTP Status: {res.status_code}"
     except Exception as e:
         return pd.DataFrame(), str(e)
 
