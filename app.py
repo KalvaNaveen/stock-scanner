@@ -111,20 +111,37 @@ def run_trailing_backtest(df_price, capital, sl_pct):
                     "P&L": round((current_sl - entry_price) * shares, 2)
                 })
     return trades
-
 # ==========================================
-# 3. SIDEBAR CONFIG
+# 3. SIDEBAR CONFIG & SECRETS
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Core Settings")
     capital = st.number_input("Capital Per Trade (₹)", value=100000, step=10000)
     sl_percent = st.number_input("Trailing Risk (%)", value=2.0, step=0.5) / 100
-    gemini_key = st.text_input("Gemini API Key", type="password")
+    
+    # Securely load Gemini API Key
+    secret_api = st.secrets.get("GEMINI_API_KEY", "")
+    if secret_api:
+        gemini_key = secret_api
+        st.success("✅ Gemini API Key loaded from secure vault.")
+    else:
+        gemini_key = st.text_input("Gemini API Key", type="password")
     
     st.markdown("---")
     st.header("🔍 Chartink Scanner")
-    url_input = st.text_input("URL", value="https://chartink.com/screener/momentum-stocks-29112990")
-    manual_clause = st.text_area("Manual Scan Clause (Bypass)")
+    
+    # Securely load Chartink Config
+    secret_url = st.secrets.get("CHARTINK_URL", "https://chartink.com/screener/momentum-stocks-29112990")
+    secret_clause = st.secrets.get("CHARTINK_CLAUSE", "")
+    
+    url_input = st.text_input("URL", value=secret_url)
+    
+    if secret_clause:
+        manual_clause = secret_clause
+        st.success("✅ Scan Clause loaded from secure vault.")
+    else:
+        manual_clause = st.text_area("Manual Scan Clause (Bypass)")
+        
     if st.button("🚀 RUN DAILY SCAN"):
         with st.spinner("Scraping live data..."):
             df, status = scrape_chartink(url_input, manual_clause)
@@ -136,9 +153,8 @@ with st.sidebar:
                 
     st.markdown("---")
     st.header("⏱️ Historical Universe")
-    st.write("Upload your CSV watchlist (e.g., 500 stocks) to run the Time Machine Backtester.")
+    st.write("Upload your CSV watchlist to run the Time Machine Backtester.")
     uploaded_universe = st.file_uploader("Upload CSV", type=['csv'])
-
 # ==========================================
 # 4. TABBED INTERFACE
 # ==========================================
