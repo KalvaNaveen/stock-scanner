@@ -33,8 +33,7 @@ if 'portfolio' not in st.session_state: st.session_state['portfolio'] = pd.DataF
 # ==========================================
 # 2. CORE FUNCTIONS (Scraping, AI, Indicators)
 # ==========================================
-def get_ai_analysis(ticker, company, api_key):
-    if not api_key: return "⚠️ Please enter your Gemini API key in the sidebar."
+def get_ai_analysis(ticker, company, api_key="AIzaSyCmeFBH1TNhblO2G6y4jo1685k-ZiRlR28"):
     try:
         client = genai.Client(api_key=api_key)
         prompt = f"Analyze {ticker} ({company}) for a momentum breakout. Give 3 short bullet points on risk-reward and sector trends."
