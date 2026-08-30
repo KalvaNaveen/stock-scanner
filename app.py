@@ -2,202 +2,229 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+from bs4 import BeautifulSoup
 import plotly.graph_objects as go
-from google import genai
-import datetime
+import re
 
-st.set_page_config(page_title="Pro Cloud Scanner & AI Analyst", layout="wide")
-st.title("☁️ Cloud Stock Scanner & AI Backtesting Engine")
+# ==========================================
+# 1. UI OVERHAUL: MODERN FINTECH DASHBOARD
+# ==========================================
+st.set_page_config(page_title="Quant Momentum", layout="wide", initial_sidebar_state="expanded")
 
-# --- SIDEBAR CONFIGURATION ---
-st.sidebar.header("1. Upload Watchlist")
-uploaded_file = st.sidebar.file_uploader("Upload CSV", type=['csv'])
-
-TICKERS = []
-if uploaded_file is not None:
-    try:
-        df_symbols = pd.read_csv(uploaded_file)
-        col_name = next((col for col in df_symbols.columns if col.strip().lower() in ['symbol', 'ticker', 'symbols', 'tickers']), df_symbols.columns[0])
-        raw_tickers = df_symbols[col_name].dropna().astype(str).tolist()
-        TICKERS = [t.strip() + '.NS' if not t.strip().endswith('.NS') else t.strip() for t in raw_tickers]
-        st.sidebar.success(f"Loaded {len(TICKERS)} stocks.")
-    except Exception as e:
-        st.sidebar.error(f"Error reading CSV: {e}")
-
-st.sidebar.header("2. Strategy Configuration")
-strategy_choice = st.sidebar.radio("Select Strategy", ["Scanner 1: 10/21 EMA Momentum", "Scanner 2: Techno-Funda Breakout"])
-
-# --- NEW: TIME MACHINE (HISTORICAL SCAN) ---
-st.sidebar.header("3. Time Machine (Historical Scan)")
-today = datetime.date.today()
-scan_date = st.sidebar.date_input("Run scan as of date:", value=today, max_value=today)
-
-st.sidebar.header("4. AI Integration (Optional)")
-gemini_api_key = st.sidebar.text_input("Enter Google Gemini API Key", type="password")
-
-# --- AI ANALYST FUNCTION ---
-def get_ai_analysis(ticker, metrics, api_key):
-    if not api_key: return None
-    try:
-        client = genai.Client(api_key=api_key)
-        prompt = f"""
-        You are an expert quantitative trader. The Indian stock {ticker} triggered a bullish breakout on our scanner with these metrics: {metrics}. 
-        In exactly 3 bullet points, provide a rapid risk-reward analysis of this setup.
-        """
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        return response.text
-    except Exception as e:
-        return f"AI Analysis failed: {e}"
-
-# --- CORE INDICATOR CALCULATIONS ---
-@st.cache_data(show_spinner=False)
-def compute_technical_indicators(df):
-    if len(df) == 0: return df
-    df['EMA_10'] = df['Close'].ewm(span=10, adjust=False).mean()
-    df['EMA_21'] = df['Close'].ewm(span=21, adjust=False).mean()
-    df['SMA_50'] = df['Close'].rolling(window=50).mean()
-    df['SMA_200'] = df['Close'].rolling(window=200).mean()
-    df['Vol_SMA_21'] = df['Volume'].rolling(window=21).mean()
-    df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
+st.markdown("""
+    <style>
+    /* Sleek Dark Mode Fintech Theme */
+    .stApp { background-color: #0B0E14; color: #E2E8F0; }
+    .st-emotion-cache-1wivap2, .st-emotion-cache-16txtl3 { padding: 2rem 1rem; }
+    h1, h2, h3 { color: #FFFFFF; font-family: 'Inter', sans-serif; }
     
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    df['RSI_14'] = 100 - (100 / (1 + rs))
+    /* Neon Gradient Buttons */
+    .stButton>button {
+        background: linear-gradient(135deg, #00F2FE 0%, #4FACFE 100%);
+        color: #000000;
+        font-weight: 800;
+        border-radius: 6px;
+        border: none;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 4px 15px rgba(79, 172, 254, 0.4); }
     
-    df['Max_High_200'] = df['High'].rolling(window=200).max().shift(1)
-    df['Max_High_250'] = df['High'].rolling(window=250).max().shift(1)
-    df['Max_High_2500'] = df['High'].rolling(window=min(len(df)-1, 2500)).max().shift(1)
-    return df
+    /* Metric Cards */
+    div[data-testid="stMetricValue"] { color: #00FF88 !important; font-size: 2rem !important; }
+    div[data-testid="stMetricLabel"] { color: #94A3B8 !important; font-weight: 600; }
+    
+    /* Hide Streamlit Branding */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
 
-# --- SCANNER LOGIC ---
-def evaluate_scanner_1(df, market_cap):
-    if len(df) < 220: return False, {}
-    c, p, p20 = df.iloc[-1], df.iloc[-2], df.iloc[-21]
-    conds = [
-        c['Close'] > c['EMA_10'], c['EMA_10'] > c['EMA_21'], p['EMA_10'] < p['EMA_21'],
-        c['Volume'] > (c['Vol_SMA_21'] * 1.5), c['Close'] > c['SMA_200'], c['Close'] > 30,
-        c['Vol_SMA_21'] > 200000, c['Close'] < (p['Close'] * 1.06), (c['Close'] * c['Volume']) > 50000000,
-        c['SMA_50'] > c['SMA_200'], c['SMA_200'] > p20['SMA_200'], c['Close'] > (c['Max_High_200'] * 0.70),
-        c['RSI_14'] > 55, (market_cap < 250000000000) if market_cap else True
-    ]
-    if all(conds):
-        return True, {"Close": round(c['Close'], 2), "RSI": round(c['RSI_14'], 1), "Turnover (Cr)": round((c['Close'] * c['Volume']) / 1e7, 2)}
-    return False, {}
+st.title("⚡ Quant Momentum Engine")
+st.markdown("Automated Chartink Scraping & Trailing Risk Backtester")
 
-def evaluate_scanner_2(df, info):
-    if len(df) < 260: return False, {}
-    c, p = df.iloc[-1], df.iloc[-2]
-    mcap_cr = (info.get('marketCap', 0) or 0) / 1e7
-    funda_ok = (mcap_cr > 1000 and c['Close'] > 50 and (info.get('heldPercentInsiders', 0) or 0)*100 > 50 and (info.get('returnOnEquity', 0) or 0)*100 > 15)
-    volume_ok = c['Volume'] > (2 * p['Vol_SMA_20'])
-    price_ok = (c['Close'] >= (0.97 * c['Max_High_250'])) or (c['Close'] >= c['Max_High_2500'])
-    if funda_ok and volume_ok and price_ok:
-        return True, {"Close": round(c['Close'], 2), "Market Cap (Cr)": round(mcap_cr, 1)}
-    return False, {}
+# ==========================================
+# 2. CHARTINK SCRAPER FUNCTION
+# ==========================================
+@st.cache_data(ttl=300, show_spinner=False)
+def scrape_chartink(screener_url, manual_clause=""):
+    """Scrapes Chartink by extracting the CSRF token and bypassing the frontend."""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    
+    try:
+        with requests.Session() as s:
+            r = s.get(screener_url, headers=headers)
+            soup = BeautifulSoup(r.text, 'html.parser')
+            
+            # Extract CSRF Token
+            csrf_meta = soup.find('meta', {'name': 'csrf-token'})
+            csrf = csrf_meta['content'] if csrf_meta else ""
+            
+            # Extract Scan Clause
+            scan_clause = manual_clause
+            if not scan_clause:
+                # Attempt to find the hidden scan clause in the page
+                clause_match = re.search(r'scan_clause\s*:\s*\'(.*?)\'', r.text)
+                if not clause_match:
+                     clause_match = re.search(r'name="scan_clause"\s+value="(.*?)"', r.text)
+                scan_clause = clause_match.group(1) if clause_match else ""
 
-# --- UI TABS ---
-if not TICKERS:
-    st.warning("👈 Please upload your CSV file containing your stock symbols to begin.")
-    st.stop()
+            if not scan_clause:
+                return pd.DataFrame(), "Could not auto-detect scan clause. Please paste it manually."
 
-tab1, tab2 = st.tabs(["🔍 Live/Historical Scanner", "📊 Backtesting Sandbox"])
+            # Post to Chartink's backend API
+            process_url = 'https://chartink.com/screener/process'
+            post_headers = {'x-csrf-token': csrf, 'X-Requested-With': 'XMLHttpRequest', **headers}
+            payload = {'scan_clause': scan_clause}
+            
+            res = s.post(process_url, data=payload, headers=post_headers)
+            if res.status_code == 200:
+                data = res.json()
+                if 'data' in data and len(data['data']) > 0:
+                    df = pd.DataFrame(data['data'])
+                    df['nsecode'] = df['nsecode'] + '.NS' # Format for yfinance
+                    return df, "Success"
+            return pd.DataFrame(), f"Backend rejected request. Status: {res.status_code}"
+    except Exception as e:
+        return pd.DataFrame(), str(e)
 
-with tab1:
-    st.subheader(f"Running: {strategy_choice} | As of: {scan_date.strftime('%Y-%m-%d')}")
-    if st.button("Start Cloud Scan"):
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+# ==========================================
+# 3. TRAILING RISK BACKTEST ENGINE
+# ==========================================
+def run_trailing_backtest(df_price, capital=100000, sl_pct=0.02):
+    """
+    Simulates placing ₹1 Lakh per stock. 
+    Applies a dynamic trailing Stop Loss that moves up with the price.
+    """
+    trades = []
+    in_pos = False
+    
+    entry_price, entry_date, shares, highest_price, current_sl = 0, None, 0, 0, 0
+    
+    # We will look for momentum entry triggers (e.g. crossing 20 EMA) to backtest the historical performance
+    df_price['EMA_20'] = df_price['Close'].ewm(span=20, adjust=False).mean()
+    
+    for i in range(1, len(df_price)):
+        curr = df_price.iloc[i]
+        prev = df_price.iloc[i-1]
         
-        target_date = pd.to_datetime(scan_date)
-        
-        for idx, ticker in enumerate(TICKERS):
-            status_text.text(f"Scanning {ticker}...")
-            try:
-                stock = yf.Ticker(ticker)
-                # Fetch 5 years of data so historical scans have enough lookback period
-                data = stock.history(period="5y") 
+        # ENTRY LOGIC (Proxy for momentum breakout)
+        if not in_pos and curr['Close'] > curr['EMA_20'] and prev['Close'] <= prev['EMA_20']:
+            in_pos = True
+            entry_price = curr['Close']
+            entry_date = df_price.index[i]
+            shares = capital // entry_price # Buy exactly 1 Lakh worth of shares
+            
+            highest_price = entry_price
+            current_sl = entry_price * (1 - sl_pct) # Initial 2% SL
+            
+        # TRADE MANAGEMENT (Trailing SL / Target)
+        elif in_pos:
+            # Update trailing SL if price makes a new high
+            if curr['High'] > highest_price:
+                highest_price = curr['High']
+                new_sl = highest_price * (1 - sl_pct)
+                if new_sl > current_sl:
+                    current_sl = new_sl # Trailing SL moves up, never down
+            
+            # EXIT LOGIC: Price hits the trailing SL
+            if curr['Low'] <= current_sl:
+                in_pos = False
+                exit_price = current_sl # Assume filled at SL price
                 
-                if not data.empty:
-                    # Strip timezones for clean date slicing
-                    data.index = data.index.tz_localize(None)
-                    df = compute_technical_indicators(data)
+                profit_loss = (exit_price - entry_price) * shares
+                roi_pct = ((exit_price - entry_price) / entry_price) * 100
+                
+                trades.append({
+                    "Entry Date": entry_date.strftime('%Y-%m-%d'),
+                    "Exit Date": df_price.index[i].strftime('%Y-%m-%d'),
+                    "Entry Price": round(entry_price, 2),
+                    "Exit Price": round(exit_price, 2),
+                    "Shares": int(shares),
+                    "Max Price Reached": round(highest_price, 2),
+                    "P&L (₹)": round(profit_loss, 2),
+                    "ROI %": round(roi_pct, 2)
+                })
+                
+    return pd.DataFrame(trades)
+
+# ==========================================
+# 4. DASHBOARD LAYOUT & EXECUTION
+# ==========================================
+with st.sidebar:
+    st.header("⚙️ Scanner Config")
+    url_input = st.text_input("Chartink Screener URL", value="https://chartink.com/screener/momentum-stocks-29112990")
+    
+    with st.expander("Advanced Settings"):
+        capital = st.number_input("Capital Per Stock (₹)", value=100000, step=10000)
+        sl_percent = st.number_input("Trailing Stop Loss (%)", value=2.0, step=0.5) / 100
+        manual_clause = st.text_area("Manual Scan Clause (Optional)")
+        
+    run_scan = st.button("🚀 EXECUTE SCAN")
+
+if run_scan:
+    with st.spinner("Bypassing Chartink & Extracting Live Data..."):
+        chartink_df, status = scrape_chartink(url_input, manual_clause)
+        
+    if not chartink_df.empty:
+        st.success(f"Successfully scraped {len(chartink_df)} stocks from Chartink!")
+        
+        # Display sleek Dataframe
+        display_df = chartink_df[['sr', 'nsecode', 'name', 'close', 'per_chg', 'volume']].copy()
+        display_df.columns = ['#', 'Symbol', 'Company', 'LTP', 'Change %', 'Volume']
+        st.dataframe(display_df.set_index('#'), use_container_width=True)
+        
+        # --- RUN BACKTEST ON RESULTS ---
+        st.markdown("---")
+        st.subheader("📊 1 Lakh Capital Backtest (Trailing 2% SL)")
+        st.markdown(f"*Simulating historical momentum entries on today's passing stocks. Capital: ₹{capital:,.0f} per trade.*")
+        
+        tickers = chartink_df['nsecode'].tolist()
+        all_trades = pd.DataFrame()
+        
+        progress_bar = st.progress(0)
+        for idx, ticker in enumerate(tickers):
+            try:
+                stock_data = yf.download(ticker, period="1y", interval="1d", progress=False)
+                if not stock_data.empty:
+                    if isinstance(stock_data.columns, pd.MultiIndex):
+                        stock_data.columns = stock_data.columns.droplevel(1)
                     
-                    # TIME MACHINE: Truncate dataframe up to the user's selected date
-                    df_historical = df.loc[:target_date]
-                    
-                    if not df_historical.empty and len(df_historical) >= 260:
-                        passed = False
-                        if "Scanner 1" in strategy_choice:
-                            passed, metrics = evaluate_scanner_1(df_historical, stock.info.get('marketCap', 0))
-                        else:
-                            passed, metrics = evaluate_scanner_2(df_historical, stock.info)
-                        
-                        if passed:
-                            metrics["Ticker"] = ticker
-                            # Show the actual date it triggered (helpful if they pick a weekend)
-                            metrics["Trigger Date"] = df_historical.index[-1].strftime('%Y-%m-%d')
-                            results.append(metrics)
+                    trade_history = run_trailing_backtest(stock_data, capital=capital, sl_pct=sl_percent)
+                    if not trade_history.empty:
+                        trade_history.insert(0, 'Symbol', ticker.replace('.NS', ''))
+                        all_trades = pd.concat([all_trades, trade_history])
             except Exception:
                 pass
-            progress_bar.progress((idx + 1) / len(TICKERS))
+            progress_bar.progress((idx + 1) / len(tickers))
+            
+        progress_bar.empty()
         
-        status_text.text("Scan Complete!")
-        if results:
-            st.success(f"Found {len(results)} matching breakouts as of {scan_date.strftime('%Y-%m-%d')}!")
-            st.dataframe(pd.DataFrame(results).set_index("Ticker"), use_container_width=True)
+        if not all_trades.empty:
+            all_trades = all_trades.sort_values(by='Exit Date', ascending=False).reset_index(drop=True)
             
-            if gemini_api_key:
-                st.subheader("🤖 Gemini Trade Analyst Insights")
-                for res in results[:3]:
-                    with st.expander(f"AI Analysis for {res['Ticker']}", expanded=True):
-                        with st.spinner("Gemini is analyzing the chart..."):
-                            st.write(get_ai_analysis(res['Ticker'], res, gemini_api_key))
+            # Portfolio Metrics
+            total_pnl = all_trades['P&L (₹)'].sum()
+            win_rate = (len(all_trades[all_trades['P&L (₹)'] > 0]) / len(all_trades)) * 100
+            best_trade = all_trades['P&L (₹)'].max()
+            
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Total P&L Generated", f"₹{total_pnl:,.2f}")
+            c2.metric("Win Rate", f"{win_rate:.1f}%")
+            c3.metric("Total Trades", len(all_trades))
+            c4.metric("Best Single Trade", f"₹{best_trade:,.2f}")
+            
+            # Interactive Plotly Chart
+            all_trades['Cumulative P&L'] = all_trades['P&L (₹)'].cumsum()
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=all_trades.index, y=all_trades['Cumulative P&L'], mode='lines', fill='tozeroy', line=dict(color='#00FF88', width=3)))
+            fig.update_layout(title="Portfolio Equity Curve (₹)", template="plotly_dark", plot_bgcolor='#0B0E14', paper_bgcolor='#0B0E14', height=400)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.dataframe(all_trades, use_container_width=True)
         else:
-            st.warning(f"No stocks passed all strict filters on {scan_date.strftime('%Y-%m-%d')}.")
-
-with tab2:
-    st.subheader("Historical Backtest Engine")
-    test_ticker = st.selectbox("Select a Ticker to Backtest", TICKERS)
-    
-    if st.button("Run Backtest"):
-        with st.spinner(f"Backtesting {test_ticker}..."):
-            stock = yf.Ticker(test_ticker)
-            df = stock.history(period="5y")
+            st.info("No completed trades triggered in the backtest period.")
             
-            if len(df) > 200:
-                df = compute_technical_indicators(df)
-                trades = []
-                in_pos, entry_price, entry_date = False, 0, None
-                
-                for i in range(1, len(df)):
-                    curr, prev = df.iloc[i], df.iloc[i-1]
-                    buy_signal = (curr['EMA_10'] > curr['EMA_21'] and prev['EMA_10'] <= prev['EMA_21'] and curr['Close'] > curr['SMA_200'])
-                    sell_signal = curr['Close'] < curr['EMA_21']
-                    
-                    if buy_signal and not in_pos:
-                        in_pos, entry_price, entry_date = True, curr['Close'], df.index[i]
-                    elif sell_signal and in_pos:
-                        in_pos = False
-                        pnl = ((curr['Close'] - entry_price) / entry_price) * 100
-                        trades.append({"Entry": entry_date.strftime('%Y-%m-%d'), "Exit": df.index[i].strftime('%Y-%m-%d'), "Return %": round(pnl, 2)})
-                        
-                if trades:
-                    tdf = pd.DataFrame(trades)
-                    wins = tdf[tdf['Return %'] > 0]
-                    
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total Trades", len(tdf))
-                    c2.metric("Win Rate", f"{(len(wins)/len(tdf))*100:.1f}%")
-                    c3.metric("Cumulative Return", f"{tdf['Return %'].sum():.2f}%")
-                    
-                    tdf['Equity'] = (1 + tdf['Return %']/100).cumprod()
-                    fig = go.Figure(go.Scatter(x=tdf['Exit'], y=tdf['Equity'], mode='lines+markers', name='Equity Curve'))
-                    fig.update_layout(title="Strategy Portfolio Growth (1.0 = Base)")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("No trades triggered.")
-            else:
-                st.error("Not enough historical data.")
+    else:
+        st.error(f"Failed to scrape Chartink. Error: {status}")
+        st.warning("Chartink sometimes blocks cloud servers. Open the 'Advanced Settings' in the sidebar and paste the raw Scan Clause manually to bypass this.")
