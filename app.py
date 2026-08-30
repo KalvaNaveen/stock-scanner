@@ -128,9 +128,17 @@ with st.sidebar:
     sl_percent = st.number_input("Trailing SL / Target (%)", value=2.0, step=0.5) / 100
     gemini_key = st.text_input("Gemini API Key", type="password")
     
+    st.markdown("---")
+    st.header("🔧 Bypass Chartink Block")
+    st.markdown("Chartink occasionally blocks cloud servers. To bypass, paste the **scan_clause** from the website's source code below:")
+    
+    # Here is the missing input box!
+    manual_clause = st.text_area("Manual Scan Clause", placeholder="( {33619} ( latest close > ... ) )")
+    
     if st.button("🚀 PULL CHARTINK DATA"):
         with st.spinner("Scraping Chartink..."):
-            df, status = scrape_chartink(url_input)
+            # I also updated this line to ensure the manual_clause is passed to the scraper
+            df, status = scrape_chartink(url_input, manual_clause) 
             if not df.empty:
                 st.session_state['chartink_data'] = df
                 st.success(f"Scraped {len(df)} stocks!")
