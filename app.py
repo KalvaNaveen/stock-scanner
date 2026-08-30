@@ -4,11 +4,11 @@ import pandas as pd
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-import plotly.graph_objects as go
 import re
 from google import genai
 import datetime
 import os
+import json
 
 # ==========================================
 # 1. UI OVERHAUL & PERSISTENT STATE
@@ -37,7 +37,6 @@ if 'chartink_data' not in st.session_state:
 if 'portfolio' not in st.session_state:
     if os.path.exists(PORTFOLIO_FILE):
         df = pd.read_csv(PORTFOLIO_FILE)
-        # Ensure new AI columns exist for backwards compatibility with old saves
         for col in PORTFOLIO_COLS:
             if col not in df.columns: df[col] = ""
         st.session_state['portfolio'] = df
@@ -47,30 +46,46 @@ if 'portfolio' not in st.session_state:
 # ==========================================
 # 2. CORE FUNCTIONS
 # ==========================================
-def get_ai_score_and_analysis(ticker, company, api_key):
-    if not api_key: return {"score": 0, "analysis": "No API Key provided."}
+def get_batch_ai_scores(dataframe, api_key):
+    """Sends all top stocks to Gemini in a SINGLE API call to avoid 429 Rate Limits."""
+    if not api_key: 
+        st.error("No API Key provided.")
+        return dataframe
+        
     try:
         client = genai.Client(api_key=api_key)
+        
+        # Format list for Gemini
+        stock_list = "\n".join([f"- {row['nsecode']}: {row['name']}" for _, row in dataframe.iterrows()])
+        
         prompt = f"""
-        You are a strict institutional quantitative analyst. 
-        Analyze the Indian stock {ticker} ({company}) for a next-day momentum breakout entry.
-        Evaluate sector tailwinds, macroeconomic conditions, and fundamental reliability.
-        You MUST respond EXACTLY in this format:
-        SCORE: [Assign a number from 0 to 100 representing breakout confidence]
-        ANALYSIS: [Provide 3 concise bullet points explaining the thesis and risks]
+        You are a strict institutional quant analyst. Evaluate these Indian stocks for a momentum breakout tomorrow:
+        {stock_list}
+        
+        Respond STRICTLY in JSON format. Do not use markdown blocks. 
+        Format exactly like this:
+        {{
+            "RELIANCE.NS": {{"score": 85, "thesis": "Strong volume, sector tailwinds..."}},
+            "TCS.NS": {{"score": 60, "thesis": "IT sector weak, wait for pullback..."}}
+        }}
         """
+        
         res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
         
-        # Parse the structured response
-        score_match = re.search(r'SCORE:\s*(\d+)', res)
-        score = int(score_match.group(1)) if score_match else 0
+        # Clean and parse JSON
+        clean_json = res.replace("```json", "").replace("```", "").strip()
+        scores = json.loads(clean_json)
         
-        analysis_split = re.split(r'ANALYSIS:', res)
-        analysis = analysis_split[1].strip() if len(analysis_split) > 1 else res
-        
-        return {"score": score, "analysis": analysis}
+        # Map scores back to the dataframe
+        for idx, row in dataframe.iterrows():
+            symbol = row['nsecode']
+            if symbol in scores:
+                dataframe.at[idx, 'AI_Score'] = scores[symbol].get('score', 0)
+                dataframe.at[idx, 'AI_Analysis'] = scores[symbol].get('thesis', "No thesis provided.")
+        return dataframe
     except Exception as e:
-        return {"score": 0, "analysis": f"AI Error: {e}"}
+        st.error(f"Batch AI Error: {e}")
+        return dataframe
 
 @st.cache_data(ttl=300, show_spinner=False)
 def scrape_chartink(screener_url, manual_clause=""):
@@ -97,7 +112,6 @@ def scrape_chartink(screener_url, manual_clause=""):
                     if len(data['data']) == 0: return pd.DataFrame(), "Success, but 0 stocks matched today."
                     df = pd.DataFrame(data['data'])
                     df['nsecode'] = df['nsecode'] + '.NS'
-                    # Initialize AI columns so they exist in the dataframe
                     df['AI_Score'] = 0
                     df['AI_Analysis'] = "Pending AI Scan..."
                     return df, "Success"
@@ -147,18 +161,22 @@ with tab1:
         
         st.subheader("1. Run Deep AI Analysis")
         st.write("Score today's breakouts using Gemini before adding them to your trading book.")
-        if st.button("🧠 Generate AI Scores for All Scans"):
+        
+        if st.button("🧠 Generate AI Scores (Batch Process)"):
             if gemini_key:
-                progress = st.progress(0)
-                for idx, row in df.iterrows():
-                    res = get_ai_score_and_analysis(row['nsecode'], row['name'], gemini_key)
-                    df.at[idx, 'AI_Score'] = res['score']
-                    df.at[idx, 'AI_Analysis'] = res['analysis']
-                    progress.progress((idx + 1) / len(df))
+                with st.spinner("Sending batch request to Gemini..."):
+                    # Only analyze top 15 by volume to ensure we stay well within API limits
+                    top_stocks = df.sort_values(by="volume", ascending=False).head(15)
+                    scored_df = get_batch_ai_scores(top_stocks, gemini_key)
+                    
+                    # Merge scores back into main dataframe
+                    for idx, row in scored_df.iterrows():
+                        df.at[idx, 'AI_Score'] = row['AI_Score']
+                        df.at[idx, 'AI_Analysis'] = row['AI_Analysis']
+                        
                 st.session_state['chartink_data'] = df
                 df.to_csv(SCAN_FILE, index=False)
-                progress.empty()
-                st.success("Deep AI Analysis Complete! Sort by AI Score below.")
+                st.success("Deep AI Analysis Complete! No API Limits Hit.")
             else:
                 st.error("Please provide a Gemini API Key in the sidebar.")
 
@@ -169,7 +187,6 @@ with tab1:
         
         st.markdown("---")
         st.subheader("2. Add to Next-Day Execution Book (9:15 AM)")
-        st.markdown("*Selected stocks will be logged for entry at today's Closing Price. A strict -2% Stop Loss will be applied.*")
         
         selected_stocks = st.multiselect("Select High-Conviction Stocks:", display_df['Symbol'].tolist())
         if st.button("Log Trades for Tomorrow"):
@@ -179,7 +196,6 @@ with tab1:
                     row_data = display_df[display_df['Symbol'] == sym].iloc[0]
                     ltp = row_data['LTP']
                     shares = capital // ltp
-                    # Next day string for logging
                     next_day = (datetime.date.today() + datetime.timedelta(days=1)).strftime('%Y-%m-%d')
                     
                     new_trades.append({
@@ -191,7 +207,7 @@ with tab1:
             if new_trades:
                 st.session_state['portfolio'] = pd.concat([st.session_state['portfolio'], pd.DataFrame(new_trades)], ignore_index=True)
                 st.session_state['portfolio'].to_csv(PORTFOLIO_FILE, index=False)
-                st.success(f"Added {len(new_trades)} stocks to your Paper Trading Book for 9:15 AM execution!")
+                st.success(f"Added {len(new_trades)} stocks to your Paper Trading Book!")
     else:
         st.info("Run the EOD Scan in the sidebar to view today's breakouts.")
 
@@ -223,7 +239,6 @@ with tab2:
                                 current_close = float(live_data['Close'].iloc[-1])
                                 current_high = float(live_data['High'].iloc[-1])
                                 
-                                # Trailing SL Math: Only moves UP
                                 if current_high > row['Max Reached']:
                                     port_df.at[idx, 'Max Reached'] = current_high
                                     new_sl = current_high * (1 - sl_percent)
@@ -233,7 +248,6 @@ with tab2:
                                 port_df.at[idx, 'Current LTP'] = round(current_close, 2)
                                 port_df.at[idx, 'Unrealized P&L'] = round((current_close - row['Entry Price']) * row['Shares'], 2)
                                 
-                                # Strict -2% Stop Loss Hit Check
                                 if current_close <= port_df.at[idx, 'Trailing SL']:
                                     port_df.at[idx, 'Status'] = '🔴 CLOSED (SL HIT)'
                         except Exception:
@@ -247,7 +261,6 @@ with tab2:
             if 'SL HIT' in str(val): return 'color: #FF3366; font-weight: bold;'
             return ''
             
-        # Display the dataframe with AI configurations
         st.dataframe(
             port_df.style.map(highlight_status, subset=['Status']), 
             use_container_width=True,
