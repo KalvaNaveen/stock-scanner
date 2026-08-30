@@ -46,42 +46,112 @@ if 'portfolio' not in st.session_state:
 # ==========================================
 # 2. CORE FUNCTIONS
 # ==========================================
+import json
+
 def get_batch_ai_scores(dataframe, api_key):
-    """Sends all top stocks to Gemini in a SINGLE API call to avoid 429 Rate Limits."""
+    """Fetches real market data via yfinance and sends a structured prompt to Gemini."""
     if not api_key: 
         st.error("No API Key provided.")
         return dataframe
         
     try:
         client = genai.Client(api_key=api_key)
+        enriched_stocks = []
         
-        # Format list for Gemini
-        stock_list = "\n".join([f"- {row['nsecode']}: {row['name']}" for _, row in dataframe.iterrows()])
+        # 1. Fetch real-time metrics via yfinance to prevent any AI hallucination
+        for _, row in dataframe.iterrows():
+            ticker = row['nsecode']
+            name = row['name']
+            close_price = row['close']
+            
+            # Default values
+            mcap_cr = 0
+            pe_ttm = 0.0
+            
+            try:
+                stock_obj = yf.Ticker(ticker)
+                info = stock_obj.info
+                mcap = info.get('marketCap', 0)
+                mcap_cr = round(mcap / 10000000, 2) if mcap else 0 # Convert to Crores
+                pe_ttm = round(info.get('trailingPE', 0.0), 2) if info.get('trailingPE') else 0.0
+            except Exception:
+                pass
+                
+            enriched_stocks.append({
+                "symbol": ticker,
+                "name": name,
+                "close": close_price,
+                "market_cap_cr": mcap_cr,
+                "pe_ttm": pe_ttm
+            })
+
+        stock_payload = json.dumps(enriched_stocks, indent=2)
         
+        # 2. Strict Structured Prompt enforcing your JSON schema
         prompt = f"""
-        You are a strict institutional quant analyst. Evaluate these Indian stocks for a momentum breakout tomorrow:
-        {stock_list}
+        You are a strict institutional quant analyst. Evaluate these Indian stocks for a momentum breakout tomorrow based on the provided live metrics:
+        {stock_payload}
         
-        Respond STRICTLY in JSON format. Do not use markdown blocks. 
-        Format exactly like this:
+        Respond STRICTLY in valid JSON format. Do not use markdown blocks, backticks, or extra text.
+        Format your response EXACTLY following this nested JSON structure for every stock:
         {{
-            "RELIANCE.NS": {{"score": 85, "thesis": "Strong volume, sector tailwinds..."}},
-            "TCS.NS": {{"score": 60, "thesis": "IT sector weak, wait for pullback..."}}
+          "SYMBOL.NS": {{
+            "momentum_score": 82,
+            "breakout_thesis": "Concise summary of the momentum strength...",
+            "radar_trigger": {{
+              "reason": "Consolidation breakout above resistance with high RVOL",
+              "verifiable_proof": "Volume expansion above 20 EMA"
+            }},
+            "technicals_and_execution": {{
+              "breakout_trigger_price": 0.0,
+              "target_price": 0.0,
+              "invalidation_stop_loss": 0.0,
+              "risk_reward_ratio": "1:2.5",
+              "rvol_20d": 2.1,
+              "delivery_pct": "N/A"
+            }},
+            "shareholding_pattern": {{
+              "quarter": "Latest",
+              "promoter_pct": 0.0,
+              "promoter_pledged_pct": 0.0,
+              "fii_pct": 0.0,
+              "dii_pct": 0.0,
+              "public_pct": 0.0
+            }},
+            "fundamentals": {{
+              "market_cap_cr": 0.0,
+              "pe_ttm": 0.0,
+              "quarterly_revenue_growth_yoy": "N/A",
+              "quarterly_pat_growth_yoy": "N/A"
+            }}
+          }}
         }}
         """
         
         res = client.models.generate_content(model='gemini-2.5-flash', contents=prompt).text
         
-        # Clean and parse JSON
+        # Clean and parse JSON response safely
         clean_json = res.replace("```json", "").replace("```", "").strip()
         scores = json.loads(clean_json)
         
-        # Map scores back to the dataframe
+        # 3. Map back to dataframe and overwrite fundamental values with verified real data
         for idx, row in dataframe.iterrows():
             symbol = row['nsecode']
             if symbol in scores:
-                dataframe.at[idx, 'AI_Score'] = scores[symbol].get('score', 0)
-                dataframe.at[idx, 'AI_Analysis'] = scores[symbol].get('thesis', "No thesis provided.")
+                stock_data = scores[symbol]
+                
+                # Overwrite fundamentals with the actual live values fetched via yfinance
+                match_item = next((s for s in enriched_stocks if s['symbol'] == symbol), None)
+                if match_item:
+                    if 'fundamentals' not in stock_data:
+                        stock_data['fundamentals'] = {}
+                    stock_data['fundamentals']['market_cap_cr'] = match_item['market_cap_cr']
+                    stock_data['fundamentals']['pe_ttm'] = match_item['pe_ttm']
+
+                dataframe.at[idx, 'AI_Score'] = stock_data.get('momentum_score', 0)
+                dataframe.at[idx, 'AI_Analysis'] = stock_data.get('breakout_thesis', "No thesis provided.")
+                dataframe.at[idx, 'AI_Full_JSON'] = json.dumps(stock_data)
+                
         return dataframe
     except Exception as e:
         st.error(f"Batch AI Error: {e}")
